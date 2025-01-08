@@ -1,0 +1,42 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "member_id": "Member ID",
+          "phone_number": "Phone Number",
+          "screensize": "Screen Size",
+          "mediacode": "Media Code",
+          "systemversion": "System Version",
+          "clientversion": "Client Version",
+          "model": "Model",
+          "deviceid": "Device ID",
+          "jsbundle": "JS Bundle",
+          "sfbuy_ticket": "SFBuy Ticket"
+        },
+        "description": "Enter your Foodpanda HK Token and Refresh Token",
+        "title": "Foodpanda HK"
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "sfbuy_ticket": "SFBuy Ticket"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "unknown": "Unexpected error"
+    }
+  }
+}
