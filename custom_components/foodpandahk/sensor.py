@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import logging
-import aiohttp
-import json
 from datetime import timedelta
-from .utils import refresh_foodpanda_token
+
+import aiohttp
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -14,13 +13,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
+    UpdateFailed,
 )
 
-from .const import (
-    DOMAIN,
-    TRACKING_ENDPOINT,
-    RENEW_TOKEN_ENDPOINT,
-)
+
+from .const import DOMAIN, MOBILE_USER_AGENT, TRACKING_ENDPOINT
+from .utils import refresh_foodpanda_token, token_needs_refresh
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,13 +31,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Foodpanda HK sensor."""
-
     coordinator = FoodpandaCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
-
-    entities = [FoodpandaWaybillSensor(coordinator)]
-    
-    async_add_entities(entities, True)
+    async_add_entities([FoodpandaWaybillSensor(coordinator)], True)
 
 
 class FoodpandaCoordinator(DataUpdateCoordinator):
@@ -54,50 +48,68 @@ class FoodpandaCoordinator(DataUpdateCoordinator):
             update_interval=SCAN_INTERVAL,
         )
         self.entry = entry
+        self._last_known_data = None
+
+    async def _refresh_and_update_tokens(self) -> str | None:
+        """Refresh tokens and persist to config entry. Returns new access token or None."""
+        config = self.entry.data
+        result = await refresh_foodpanda_token(
+            config.get("device_token", ""),
+            config.get("refresh_token", ""),
+        )
+        if result and "access_token" in result and "refresh_token" in result:
+            new_data = dict(self.entry.data)
+            new_data["token"] = result["access_token"]
+            new_data["refresh_token"] = result["refresh_token"]
+            self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+            return result["access_token"]
+        _LOGGER.error("Failed to refresh token: %s", result)
+        return None
 
     async def _async_update_data(self):
-        """Fetch data from Foodpanda using the tracking endpoint and token authentication."""
-        config = self.entry.data
-        device_token_val = config.get("device_token", "")
-        token = config.get("token", "")
-        refresh_token_val = config.get("refresh_token", "")
-        user_agent_val = config.get("user_agent", "")
+        """Fetch data from Foodpanda tracking API."""
+        token = self.entry.data.get("token", "")
+
+        # Proactive refresh if token is about to expire
+        if token_needs_refresh(token):
+            _LOGGER.info("Token expiring soon, refreshing proactively")
+            new_token = await self._refresh_and_update_tokens()
+            if new_token:
+                token = new_token
 
         headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
             "x-fp-api-key": "volo",
-            "User-Agent": user_agent_val,
+            "User-Agent": MOBILE_USER_AGENT,
         }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(TRACKING_ENDPOINT, headers=headers) as response:
                     if response.status == 401:
-                        # Token expired, refresh it
-                        refresh_result = await refresh_foodpanda_token(device_token_val, refresh_token_val, user_agent_val)
-                        if refresh_result and "access_token" in refresh_result and "refresh_token" in refresh_result:
-                            # Update tokens in config entry and persist
-                            new_data = dict(self.entry.data)
-                            new_data["token"] = refresh_result["access_token"]
-                            new_data["refresh_token"] = refresh_result["refresh_token"]
-                            self.hass.config_entries.async_update_entry(self.entry, data=new_data)
-                            # Retry with new token
-                            headers["Authorization"] = f"Bearer {refresh_result['access_token']}"
-                            async with session.get(TRACKING_ENDPOINT, headers=headers) as retry_response:
-                                retry_response.raise_for_status()
-                                data = await retry_response.json()
-                                _LOGGER.debug("Foodpanda tracking API response (after refresh): %s", data)
-                                return data
-                        else:
-                            _LOGGER.error("Failed to refresh token: %s", refresh_result)
-                            return None
+                        _LOGGER.warning("Got 401, refreshing token")
+                        new_token = await self._refresh_and_update_tokens()
+                        if not new_token:
+                            raise UpdateFailed("Token refresh failed after 401")
+                        headers["Authorization"] = f"Bearer {new_token}"
+                        async with session.get(
+                            TRACKING_ENDPOINT, headers=headers
+                        ) as retry_response:
+                            retry_response.raise_for_status()
+                            data = await retry_response.json()
+                            _LOGGER.debug("Tracking response (after refresh): %s", data)
+                            self._last_known_data = data
+                            return data
                     response.raise_for_status()
                     data = await response.json()
-                    _LOGGER.debug("Foodpanda tracking API response: %s", data)
+                    _LOGGER.debug("Tracking response: %s", data)
+                    self._last_known_data = data
                     return data
+        except UpdateFailed:
+            raise
         except Exception as err:
-            _LOGGER.error("Error updating Foodpanda data: %s", err)
-            return None
+            _LOGGER.warning("Network error, using cached data: %s", err)
+            return self._last_known_data
 
 
 class FoodpandaWaybillSensor(CoordinatorEntity, SensorEntity):
@@ -111,7 +123,7 @@ class FoodpandaWaybillSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
-        """Return the name of the current active status in active_orders[0][status_messages][titles]."""
+        """Return the name of the current active status."""
         if self.coordinator.data is None:
             return None
         try:
@@ -124,16 +136,15 @@ class FoodpandaWaybillSensor(CoordinatorEntity, SensorEntity):
                     return title.get("name")
             return "IDLE"
         except Exception as err:
-            _LOGGER.error("Error extracting active status name: %s", err)
+            _LOGGER.error("Error extracting active status: %s", err)
             return None
 
     @property
     def extra_state_attributes(self):
-        """Return the state attributes: everything inside the 'data' key of the response."""
+        """Return the state attributes."""
         if self.coordinator.data is None:
             return {}
         try:
-            # Return all items inside 'data' as attributes
             return dict(self.coordinator.data.get("data", {}))
         except Exception as err:
             _LOGGER.error("Error extracting sensor attributes: %s", err)

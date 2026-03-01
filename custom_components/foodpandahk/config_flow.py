@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import logging
+
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_DEVICE_ID
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
 
 class FoodpandaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Foodpanda HK."""
@@ -44,7 +44,6 @@ class FoodpandaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         vol.Required("device_token"): str,
                         vol.Required("token"): str,
                         vol.Required("refresh_token"): str,
-                        vol.Required("user_agent"): str,
                     }
                 ),
             )
@@ -53,7 +52,6 @@ class FoodpandaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "device_token": user_input["device_token"],
             "token": user_input["token"],
             "refresh_token": user_input["refresh_token"],
-            "user_agent": user_input["user_agent"],
         }
         return self.async_create_entry(
             title="Foodpanda HK",
@@ -72,15 +70,15 @@ class FoodpandaOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, str] | None = None
     ) -> FlowResult:
         """Manage the options."""
-        errors = {}
-
         if user_input is not None:
-            self._config_entry.data["device_token"] = user_input["device_token"]
-            self._config_entry.data["token"] = user_input["token"]
-            self._config_entry.data["refresh_token"] = user_input["refresh_token"]
-            self._config_entry.data["user_agent"] = user_input["user_agent"]
-
-            return self.async_create_entry(title="Foodpanda HK", data=self._config_entry.data)
+            new_data = dict(self._config_entry.data)
+            new_data["device_token"] = user_input["device_token"]
+            new_data["token"] = user_input["token"]
+            new_data["refresh_token"] = user_input["refresh_token"]
+            self.hass.config_entries.async_update_entry(
+                self._config_entry, data=new_data
+            )
+            return self.async_create_entry(title="Foodpanda HK", data={})
 
         defaults = self._config_entry.data
         return self.async_show_form(
@@ -90,8 +88,6 @@ class FoodpandaOptionsFlow(config_entries.OptionsFlow):
                     vol.Required("device_token", default=defaults.get("device_token", "")): str,
                     vol.Required("token", default=defaults.get("token", "")): str,
                     vol.Required("refresh_token", default=defaults.get("refresh_token", "")): str,
-                    vol.Required("user_agent", default=defaults.get("user_agent", "")): str,
                 }
             ),
-            errors=errors,
         )

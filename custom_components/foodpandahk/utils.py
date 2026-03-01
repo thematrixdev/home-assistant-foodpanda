@@ -1,55 +1,46 @@
 """Utility functions for Foodpanda HK integration."""
-import hashlib
-import json
 import base64
+import json
+import logging
+import time
+
 import aiohttp
 
-def decode_secret(encoded: str) -> str:
-    """Decode base64 encoded secret."""
-    return base64.b64decode(encoded).decode('utf-8')
+from .const import MOBILE_USER_AGENT, RENEW_TOKEN_ENDPOINT, TOKEN_REFRESH_BUFFER
 
-BODY_SECRET = "TndwQDlCMlZPUE1mUFFpNEI5Tn4mUEpGUVlxNkNTT3c="
-FIRST_SECRET = "ZXYyV01CfnE0YSZheVNEdkVORDU3SThCK2duVkReQG8="
-SECOND_SECRET = "NmhuOFRUZWtPcEVLOTJhJSt1eWdHQWxoaSRiYSRZNjI="
+_LOGGER = logging.getLogger(__name__)
 
-def md5_hex(string: str) -> str:
-    return hashlib.md5(string.encode("utf-8")).hexdigest()
 
-def generate_syttoken(
-    body_json: str,
-    device_id: str,
-    client_version: str,
-    time_interval: str,
-    region_code: str,
-    language_code: str,
-    js_bundle: str,
-) -> str:
-    body_secret = decode_secret(BODY_SECRET)
-    body_hash = md5_hex(body_json + "&" + body_secret)
+def decode_jwt_expiry(token: str) -> int | None:
+    """Decode JWT payload and return the 'expires' timestamp."""
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return payload.get("expires")
+    except Exception:
+        _LOGGER.warning("Failed to decode JWT expiry")
+        return None
 
-    first_secret = decode_secret(FIRST_SECRET)
-    raw_str1 = (
-        device_id
-        + time_interval
-        + client_version
-        + first_secret
-        + region_code
-        + language_code
-        + body_hash
-        + js_bundle
-    )
 
-    md5_1 = md5_hex(raw_str1 + "&" + first_secret)
+def token_needs_refresh(token: str) -> bool:
+    """Check if the token expires within TOKEN_REFRESH_BUFFER seconds."""
+    expires = decode_jwt_expiry(token)
+    if expires is None:
+        return False
+    remaining = expires - int(time.time())
+    _LOGGER.debug("Token expires in %ds (%dm)", remaining, remaining // 60)
+    return remaining < TOKEN_REFRESH_BUFFER
 
-    second_secret = decode_secret(SECOND_SECRET)
-    return md5_hex(md5_1 + "&" + second_secret)
 
-async def refresh_foodpanda_token(device_token: str, refresh_token: str, user_agent: str) -> dict | None:
+async def refresh_foodpanda_token(
+    device_token: str, refresh_token: str
+) -> dict | None:
+    """Refresh Foodpanda token using the refresh endpoint.
+
+    Uses a mobile app User-Agent to bypass PerimeterX bot protection
+    on www.foodpanda.hk.
     """
-    Refresh Foodpanda token using the refresh endpoint.
-    Returns a dict with new tokens and expiry info, or None on error.
-    """
-    from .const import RENEW_TOKEN_ENDPOINT
     payload = {
         "country": "hk",
         "platform": "b2c",
@@ -59,22 +50,25 @@ async def refresh_foodpanda_token(device_token: str, refresh_token: str, user_ag
     headers = {
         "Content-Type": "application/json",
         "x-fp-api-key": "volo",
-        "User-Agent": user_agent,
+        "User-Agent": MOBILE_USER_AGENT,
+        "Accept": "application/json",
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(RENEW_TOKEN_ENDPOINT, json=payload, headers=headers) as resp:
-                text = await resp.text()
-                try:
-                    resp.raise_for_status()
-                except Exception as http_err:
-                    print(f"Token refresh HTTP error: {http_err}, status: {resp.status}, response: {text}")
+            async with session.post(
+                RENEW_TOKEN_ENDPOINT, json=payload, headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    _LOGGER.error(
+                        "Token refresh failed (HTTP %s): %s",
+                        resp.status,
+                        text[:200],
+                    )
                     return None
-                try:
-                    return await resp.json()
-                except Exception as json_err:
-                    print(f"Token refresh JSON decode error: {json_err}, raw response: {text}")
-                    return None
+                data = await resp.json()
+                _LOGGER.info("Token refreshed successfully")
+                return data
     except Exception as err:
-        print(f"Error refreshing Foodpanda token: {err}, payload: {payload}, headers: {headers}")
+        _LOGGER.error("Error refreshing Foodpanda token: %s", err)
         return None
